@@ -1,13 +1,12 @@
 import asyncio
 from playwright.async_api import async_playwright
 import config
-import notifier
 import time
 
-async def check_availability():
+async def check_availability(days_to_check, target_slots, headless):
     async with async_playwright() as p:
         # Launch browser
-        browser = await p.chromium.launch(headless=config.HEADLESS)
+        browser = await p.chromium.launch(headless=headless)
         page = await browser.new_page()
 
         try:
@@ -85,7 +84,7 @@ async def check_availability():
             await page.wait_for_selector('swiper-slide, .creneaux', timeout=10000)
             
             # Check Slots
-            print(f"Scanning for available slots matching: {config.TARGET_SLOTS}")
+            print(f"Scanning for available slots matching: {target_slots}")
             available_results = {} # format: {"Date String": ["18:00"]}
             
             # Locate Day Slides
@@ -122,7 +121,7 @@ async def check_availability():
                         current_day_idx = val
                         break
                 
-                if current_day_idx not in config.DAYS_TO_CHECK:
+                if current_day_idx not in days_to_check:
                     print(f"Skipping {date_clean} (Not in target days)")
                     continue
 
@@ -159,7 +158,7 @@ async def check_availability():
                                  slot_text = await slot_el.inner_text()
                                  slot_text = slot_text.strip()
                                  
-                                 if slot_text in config.TARGET_SLOTS:
+                                 if slot_text in target_slots:
                                      day_slots.append(f"{slot_text} - {court_name}")
                     except Exception as e:
                         print(f"Error parsing card {k}: {e}")
@@ -190,9 +189,9 @@ async def check_availability():
             print(f"\nJSON output written to output.json: {n8n_output}")
 
             # Send Notification if results found
+            # Send Notification if results found
             if available_results:
-                print("\nMatch found! Sending notification...")
-                notifier.send_notification(available_results)
+                print("\nMatch found! See output.json")
             else:
                 print("\nNo slots found matching criteria.")
                 
@@ -211,7 +210,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Padel Reservation Bot")
     parser.add_argument("--email", type=str, help="User email address")
     parser.add_argument("--password", type=str, help="User password")
-    
+    parser.add_argument("--days", type=int, nargs='+', default=[0, 1, 2, 3, 4], help="Days to check (0=Mon, 6=Sun). Default: 0-4")
+    parser.add_argument("--slots", type=str, nargs='+', default=["18:00", "19:30"], help="Slots to check (e.g. 18:00 19:30). Default: 18:00 19:30")
+    parser.add_argument("--headless", action="store_true", help="Run in headless mode")
+
     args = parser.parse_args()
     
     if args.email:
@@ -223,4 +225,4 @@ if __name__ == "__main__":
         print("Error: Email and Password must be provided via --email/--password arguments or .env file (MAS_EMAIL, MAS_PASSWORD).")
         exit(1)
         
-    asyncio.run(check_availability())
+    asyncio.run(check_availability(args.days, args.slots, args.headless))
