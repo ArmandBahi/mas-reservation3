@@ -1,7 +1,9 @@
 import asyncio
 from playwright.async_api import async_playwright
 import config
-import time
+import re
+import json
+import os
 
 async def check_availability(days_to_check, target_slots, headless):
     async with async_playwright() as p:
@@ -21,6 +23,7 @@ async def check_availability(days_to_check, target_slots, headless):
                 # Email is type="text" with name="email"
                 await page.wait_for_selector('input[name="email"]', state="visible", timeout=10000)
                 await page.fill('input[name="email"]', config.EMAIL)
+                await asyncio.sleep(0.5)  # Pause after filling email
                 
                 # Check if password field is visible. 
                 # If not, we might need to click the button first (if it acts as "Next") or press Enter.
@@ -34,9 +37,11 @@ async def check_availability(days_to_check, target_slots, headless):
                     next_btn = page.locator('button:has-text("Connexion / Inscription")').first
                     if await next_btn.is_visible():
                         await next_btn.click()
+                        await asyncio.sleep(0.5)  # Pause after clicking button
                     else:
                         print("Warning: 'Connexion / Inscription' button not found, trying Enter...")
                         await page.keyboard.press('Enter')
+                        await asyncio.sleep(0.5)  # Pause after pressing Enter
                     
                     # Wait for password to appear
                     await password_input.wait_for(state="visible", timeout=5000)
@@ -44,11 +49,13 @@ async def check_availability(days_to_check, target_slots, headless):
                 # Fill Password
                 print("Entering password...")
                 await password_input.fill(config.PASSWORD)
+                await asyncio.sleep(0.5)  # Pause after filling password
                 
                 # Click Login Button
                 print("Clicking login button...")
                 # User specified: <button ...> Se connecter </button>
                 await page.locator('button:has-text("Se connecter")').first.click()
+                await asyncio.sleep(0.5)  # Pause after clicking login button
                 
                 # Wait for navigation
                 await page.wait_for_url('**/appli/**', timeout=15000)
@@ -74,9 +81,11 @@ async def check_availability(days_to_check, target_slots, headless):
                 window.localStorage.setItem('welcome_popup_seen', true);
                 window.localStorage.setItem('resa_filters', JSON.stringify({"sports": ["Padel"], "type": ["indoor"]}));
             """)
+            await asyncio.sleep(0.5)  # Pause after injecting LocalStorage
             
             print("Navigating to planning page (with pre-set filters)...")
             await page.goto(config.PLANNING_URL)
+            await asyncio.sleep(0.5)  # Pause after navigation
             
             # Wait for reload and grid
             # Match logic with user provided HTML structure
@@ -115,11 +124,20 @@ async def check_availability(days_to_check, target_slots, headless):
                 }
                 
                 # Identify current day index
+                # Check if day of week is at the beginning of the text (valid day slide)
+                # Valid format: "lun. 16 févr." - day should be at start
+                date_clean_lower = date_clean.lower()
                 current_day_idx = -1
                 for key, val in day_map.items():
-                    if key in date_clean.lower():
+                    # Check if day starts at the beginning of the text
+                    if date_clean_lower.startswith(key):
                         current_day_idx = val
                         break
+                
+                # If no day found at start, it's not a valid day slide
+                if current_day_idx == -1:
+                    print(f"Skipping {date_clean[:50]}... (Not a valid day slide)")
+                    continue
                 
                 if current_day_idx not in days_to_check:
                     print(f"Skipping {date_clean} (Not in target days)")
@@ -129,11 +147,12 @@ async def check_availability(days_to_check, target_slots, headless):
                 # Only click if not already selected (class 'selected' on div inside)
                 # But clicking valid slide is generally safe in this app
                 await slide.click()
+                await asyncio.sleep(0.5)  # Pause after clicking day
                 
                 # Wait for slots to load for this day
                 # Since it's an SPA, we need a small buffer or check for update.
                 # A 1.5s sleep is a practical robust solution here.
-                time.sleep(1.5) 
+                await asyncio.sleep(1.5)  # Additional wait for slots to fully load 
                 
                 # Parse Slots by Card/Court
                 day_slots = []
@@ -155,8 +174,22 @@ async def check_availability(days_to_check, target_slots, headless):
                         for j in range(count_slots):
                              slot_el = slots_in_card.nth(j)
                              if await slot_el.is_visible():
-                                 slot_text = await slot_el.inner_text()
-                                 slot_text = slot_text.strip()
+                                 slot_text_raw = await slot_el.inner_text()
+                                 slot_text_raw = slot_text_raw.strip()
+                                 
+                                 # Extract only the time in HH:MM format using regex
+                                 # This prevents extracting extra text from child elements
+                                 time_match = re.search(r'\b(\d{1,2}:\d{2})\b', slot_text_raw)
+                                 if time_match:
+                                     slot_text = time_match.group(1)
+                                     # Normalize to HH:MM format (e.g., "9:00" -> "09:00")
+                                     parts = slot_text.split(':')
+                                     if len(parts) == 2:
+                                         hour, minute = parts
+                                         slot_text = f"{hour.zfill(2)}:{minute}"
+                                 else:
+                                     # Fallback: use raw text if no time pattern found
+                                     slot_text = slot_text_raw
                                  
                                  if slot_text in target_slots:
                                      day_slots.append(f"{slot_text} - {court_name}")
@@ -182,13 +215,40 @@ async def check_availability(days_to_check, target_slots, headless):
                 for slot in slots:
                     n8n_output.append(f"{date} {slot}")
             
+            # Compare with previous results
+            previous_output = []
+            previous_file = "output.json"
+            if os.path.exists(previous_file):
+                try:
+                    with open(previous_file, "r", encoding="utf-8") as f:
+                        previous_output = json.load(f)
+                except Exception as e:
+                    print(f"Warning: Could not read previous output file: {e}")
+                    previous_output = []
+            
+            # Convert to sets for comparison
+            current_set = set(n8n_output)
+            previous_set = set(previous_output)
+            
+            # Check for changes
+            has_changes = False
+            if previous_output:
+                has_changes = current_set != previous_set
+            
+            # Display simple comparison message
+            if not previous_output:
+                # First run, no comparison
+                pass
+            elif has_changes:
+                print("COMPARISON : CHANGEMENTS DETECTES")
+            else:
+                print("COMPARISON : AUCUN CHANGEMENT DETECTE")
+            
             # Write to JSON file
-            import json
             with open("output.json", "w", encoding="utf-8") as f:
                 json.dump(n8n_output, f, ensure_ascii=False, indent=2)
             print(f"\nJSON output written to output.json: {n8n_output}")
 
-            # Send Notification if results found
             # Send Notification if results found
             if available_results:
                 print("\nMatch found! See output.json")
